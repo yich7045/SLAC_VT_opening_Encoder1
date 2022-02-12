@@ -32,7 +32,7 @@ class SlacAlgorithm:
         seed = 1,
         gamma=0.99,
         batch_size_sac=256,
-        batch_size_latent=32,
+        batch_size_latent=1,
         buffer_size=5 * 10 ** 6,
         num_sequences=8,
         lr_sac=3e-4,
@@ -97,7 +97,8 @@ class SlacAlgorithm:
         state = torch.tensor(ob.state, dtype=torch.uint8, device=self.device).float().div_(255.0)
         tactile = torch.tensor(ob.tactile, dtype=torch.float64, device=self.device).float().div_(1000.)
         with torch.no_grad():
-            feature = self.latent.encoder(state, tactile).view(1, -1)
+            feature, _, _ = self.latent.encoder(state, tactile)
+        feature = feature.view(1, -1)
         action = torch.tensor(ob.action, dtype=torch.float, device=self.device)
         feature_action = torch.cat([feature, action], dim=1)
         return feature_action
@@ -146,16 +147,24 @@ class SlacAlgorithm:
     def update_latent(self, writer):
         self.learning_steps_latent += 1
         state_, tactile_, action_, reward_, done_ = self.buffer.sample_latent(self.batch_size_latent)
-        loss_kld, loss_image, loss_reward = self.latent.calculate_loss(state_, tactile_, action_, reward_, done_)
+        loss_kld, loss_image, loss_reward, contact_loss, alignment_loss = self.latent.calculate_loss(state_, tactile_, action_, reward_, done_)
 
         self.optim_latent.zero_grad()
-        (loss_kld + loss_image + loss_reward).backward()
+        (loss_kld + loss_image + loss_reward + contact_loss + alignment_loss).backward()
         self.optim_latent.step()
 
         if self.learning_steps_latent % 1000 == 0:
             writer.add_scalar("loss/kld", loss_kld.item(), self.learning_steps_latent)
             writer.add_scalar("loss/reward", loss_reward.item(), self.learning_steps_latent)
             writer.add_scalar("loss/image", loss_image.item(), self.learning_steps_latent)
+
+    def update_latent_align(self, writer):
+        state_, tactile_, action_, reward_, done_ = self.buffer.misalign_sample_latent(self.batch_size_latent)
+        alignment_loss = self.latent.calculate_alignment_loss(state_, tactile_)
+
+        self.optim_latent.zero_grad()
+        (alignment_loss).backward()
+        self.optim_latent.step()
 
     def update_sac(self, writer):
         self.learning_steps_sac += 1
@@ -169,7 +178,7 @@ class SlacAlgorithm:
     def prepare_batch(self, state_, tactile_, action_):
         with torch.no_grad():
             # f(1:t+1)
-            feature_ = self.latent.encoder(state_, tactile_)
+            feature_, _, _ = self.latent.encoder(state_, tactile_)
             # z(1:t+1)
             z_ = torch.cat(self.latent.sample_posterior(feature_, action_)[2:], dim=-1)
 
